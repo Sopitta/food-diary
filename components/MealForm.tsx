@@ -54,6 +54,10 @@ export default function MealForm() {
   const [photoFile, setPhotoFile] = useState<File | null>(null);
   const [photoPreview, setPhotoPreview] = useState<string | null>(null);
   const [uploadedPath, setUploadedPath] = useState<string | null>(null);
+  // Keep the signed URL from upload so a retry / re-estimate can still send the
+  // photo to /api/estimate without re-uploading. Previously only the path was
+  // cached, so the second estimate call omitted photoUrl entirely.
+  const [uploadedUrl, setUploadedUrl] = useState<string | null>(null);
 
   const [stage, setStage] = useState<Stage>("input");
   const [estimate, setEstimate] = useState<Estimate | null>(null);
@@ -65,6 +69,7 @@ export default function MealForm() {
     const file = e.target.files?.[0] ?? null;
     setPhotoFile(file);
     setUploadedPath(null);
+    setUploadedUrl(null);
     setEstimate(null);
     setStage("input");
     setError(null);
@@ -77,6 +82,7 @@ export default function MealForm() {
     setPhotoFile(null);
     setPhotoPreview(null);
     setUploadedPath(null);
+    setUploadedUrl(null);
     if (cameraInputRef.current) cameraInputRef.current.value = "";
     if (libraryInputRef.current) libraryInputRef.current.value = "";
   }
@@ -91,7 +97,7 @@ export default function MealForm() {
     setStage("estimating");
     try {
       let photoPath = uploadedPath;
-      let photoUrl: string | undefined;
+      let photoUrl: string | undefined = uploadedUrl ?? undefined;
 
       if (photoFile && !photoPath) {
         const formData = new FormData();
@@ -104,6 +110,7 @@ export default function MealForm() {
         photoPath = uploadData.path;
         photoUrl = uploadData.url;
         setUploadedPath(uploadData.path);
+        setUploadedUrl(uploadData.url);
       }
 
       const estimateRes = await fetch("/api/estimate", {
