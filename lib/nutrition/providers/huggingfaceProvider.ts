@@ -11,13 +11,24 @@ import type { NutritionEstimate, NutritionInput, NutritionProvider } from "../ty
 // API in front of many open vision-language models. Unlike Ollama this needs no
 // server of your own, so it's the option to use once this app is deployed
 // (e.g. on Vercel) rather than run against a local machine.
-const HF_API_KEY = process.env.HUGGINGFACE_API_KEY;
+//
 // Smaller VLMs (e.g. the 3B variant) aren't routable through any Inference
 // Provider on a typical pay-as-you-go HF account - only larger checkpoints
 // like this one are, so that's the safe fallback if the env var is unset.
-const HF_MODEL = process.env.HUGGINGFACE_MODEL ?? "Qwen/Qwen2.5-VL-72B-Instruct";
+export const DEFAULT_HUGGINGFACE_MODEL = "Qwen/Qwen2.5-VL-72B-Instruct";
 const HF_BASE_URL = "https://router.huggingface.co/v1";
-const TIMEOUT_MS = Number(process.env.ESTIMATE_TIMEOUT_MS ?? 30_000);
+
+function resolveHfApiKey(): string | undefined {
+  return process.env.HUGGINGFACE_API_KEY;
+}
+
+function resolveHfModel(): string {
+  return process.env.HUGGINGFACE_MODEL ?? DEFAULT_HUGGINGFACE_MODEL;
+}
+
+function resolveTimeoutMs(): number {
+  return Number(process.env.ESTIMATE_TIMEOUT_MS ?? 30_000);
+}
 
 const estimateSchema = z.object({
   calories: z.coerce.number().min(0),
@@ -71,7 +82,8 @@ export const huggingfaceProvider: NutritionProvider = {
     if (!photoUrl && !description?.trim()) {
       throw new NutritionInputError();
     }
-    if (!HF_API_KEY) {
+    const apiKey = resolveHfApiKey();
+    if (!apiKey) {
       throw new NutritionUnavailableError(
         'Missing HUGGINGFACE_API_KEY. Create one at https://huggingface.co/settings/tokens with ' +
           '"Make calls to Inference Providers" permission.',
@@ -85,7 +97,7 @@ export const huggingfaceProvider: NutritionProvider = {
     }
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), resolveTimeoutMs());
 
     let response: Response;
     try {
@@ -93,10 +105,10 @@ export const huggingfaceProvider: NutritionProvider = {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${HF_API_KEY}`,
+          Authorization: `Bearer ${apiKey}`,
         },
         body: JSON.stringify({
-          model: HF_MODEL,
+          model: resolveHfModel(),
           messages: [{ role: "user", content }],
         }),
         signal: controller.signal,
