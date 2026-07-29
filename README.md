@@ -80,17 +80,51 @@ deploying (or any time you want a hosted model instead), switch to Hugging Face:
    ```bash
    NUTRITION_PROVIDER=huggingface
    HUGGINGFACE_API_KEY=hf_...
-   HUGGINGFACE_MODEL=Qwen/Qwen2.5-VL-3B-Instruct   # optional, this is the default
+   # Optional. Default is Qwen/Qwen2.5-VL-72B-Instruct — a checkpoint that is
+   # actually routable via Inference Providers on a typical HF account.
+   # Smaller VLMs (e.g. Qwen2.5-VL-3B-Instruct) often aren't; confirm on
+   # https://huggingface.co/settings/inference-providers before changing this.
+   HUGGINGFACE_MODEL=Qwen/Qwen2.5-VL-72B-Instruct
    ```
 
 No other code changes are needed - `lib/nutrition/estimateNutrition.ts` picks the provider based
-on `NUTRITION_PROVIDER` alone. See `lib/nutrition/providers/huggingfaceProvider.ts` to add other
-providers (OpenAI, Anthropic, etc.) the same way.
+on `NUTRITION_PROVIDER` alone. Both providers call Hugging Face / Ollama through the same
+`NutritionProvider` interface in `lib/nutrition/types.ts`. To add another backend (OpenAI,
+Anthropic, etc.), copy the pattern in `lib/nutrition/providers/huggingfaceProvider.ts` and
+register it in `getProvider()`.
+
+### Provider constraints
+
+| Concern | Ollama | Hugging Face |
+| --- | --- | --- |
+| Where it runs | Local process (`OLLAMA_BASE_URL`, default `http://localhost:11434`) | Hosted OpenAI-compatible API at `https://router.huggingface.co/v1` |
+| Model env | `OLLAMA_MODEL` (default `llava`) — must be vision-capable and already pulled | `HUGGINGFACE_MODEL` (default `Qwen/Qwen2.5-VL-72B-Instruct`) — must be routable on your account |
+| Auth | None | `HUGGINGFACE_API_KEY` required |
+| Photos | Fetched server-side and sent as base64 | Fetched server-side and inlined as a data URL (HF can't reach private/local signed URLs) |
+| Timeout | `ESTIMATE_TIMEOUT_MS` (code default 30s; `.env.local.example` uses 60s for cold local models) | Same env var |
+
+## Meal logging workflow
+
+Adding a meal on `/add` runs this client → API chain (see `components/MealForm.tsx`):
+
+1. **Upload (optional)** — `POST /api/upload` with multipart field `photo` (max 10MB). Stores the
+   file in the private `meal-photos` bucket and returns `{ path, url }` where `url` is a
+   short-lived signed URL (~1 hour).
+2. **Estimate** — `POST /api/estimate` with `{ photoUrl?, description? }` (at least one required).
+   Routes through `estimateNutrition()` → the active provider. Success body:
+   `{ calories, protein, carbs, fat }`. Errors map to HTTP 422 / 503 / 504 via
+   `lib/nutrition/errors.ts`.
+3. **Save** — `POST /api/meals` with the estimate plus optional `photoPath`, `description`, and
+   `mealType` (`breakfast` \| `lunch` \| `dinner` \| `snack` \| `drink`). Persists via
+   `lib/meals/repository.ts`.
+
+Other meal APIs: `GET /api/meals` (list, newest first), `PATCH /api/meals/[id]` (rename
+description), `DELETE /api/meals/[id]` (row + photo cleanup).
 
 ## Project structure
 
 - `app/` - routes: `/` (Log view), `/add` (meal entry form), `/api/estimate`, `/api/upload`,
-  `/api/meals`
+  `/api/meals`, `/api/meals/[id]`
 - `lib/nutrition/` - the `estimateNutrition()` seam and its providers (Ollama, Hugging Face) -
   swap between them via the `NUTRITION_PROVIDER` env var
 - `lib/meals/` - Supabase data access (repository) and day-grouping/formatting helpers
@@ -104,6 +138,20 @@ The `meals` table and `meal-photos` bucket have row-level security enabled with 
 `anon`/`authenticated`, so the browser never talks to Supabase directly - every read/write goes
 through a Next.js API route using the secret key. When multi-user auth is added later, this
 table can grow user-scoped RLS policies without changing today's server-side access pattern.
+
+`photo_url` in Postgres stores the **Storage object path**, not a public URL. Signed URLs are
+minted on read (`listMeals` / upload response) and expire after about an hour.
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+| --- | --- | --- |
+| Estimate returns 503 / "local model server is unavailable" | Ollama isn't running, or wrong `OLLAMA_BASE_URL` | Start Ollama (`ollama serve` / desktop app); confirm `ollama list` shows your model |
+| Estimate times out (504) | Cold start or slow CPU inference | Raise `ESTIMATE_TIMEOUT_MS` (e.g. `60000`); first Ollama request after idle is often slow |
+| HF estimate fails with HTTP 4xx mentioning the model | Model not routable via Inference Providers | Use the default `Qwen/Qwen2.5-VL-72B-Instruct`, or pick a VLM listed under [Inference Providers](https://huggingface.co/settings/inference-providers) for your account — smaller checkpoints often aren't available |
+| HF estimate: missing API key | `HUGGINGFACE_API_KEY` unset while `NUTRITION_PROVIDER=huggingface` | Create a fine-grained token with "Make calls to Inference Providers" and set it in env |
+| Supabase client errors on boot / upload | Missing or wrong `NEXT_PUBLIC_SUPABASE_URL` / `SUPABASE_SECRET_KEY` | Run `npx supabase status` and copy `API_URL` + `SECRET_KEY` (`sb_secret_...`) into `.env.local` |
+| Photo preview works but estimate can't load the image | Signed URL expired or Storage unreachable from the server | Re-upload / re-estimate; ensure the Next.js server can reach local Supabase (`127.0.0.1:54321`) |
 
 ## Useful commands
 
