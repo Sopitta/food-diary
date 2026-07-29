@@ -1,0 +1,133 @@
+import { z } from "zod";
+import {
+  NutritionInputError,
+  NutritionParseError,
+  NutritionTimeoutError,
+  NutritionUnavailableError,
+} from "../errors";
+import type { NutritionEstimate, NutritionInput, NutritionProvider } from "../types";
+
+// Hugging Face Inference Providers: a hosted, OpenAI-compatible chat completions
+// API in front of many open vision-language models. Unlike Ollama this needs no
+// server of your own, so it's the option to use once this app is deployed
+// (e.g. on Vercel) rather than run against a local machine.
+const HF_API_KEY = process.env.HUGGINGFACE_API_KEY;
+const HF_MODEL = process.env.HUGGINGFACE_MODEL ?? "Qwen/Qwen2.5-VL-3B-Instruct";
+const HF_BASE_URL = "https://router.huggingface.co/v1";
+const TIMEOUT_MS = Number(process.env.ESTIMATE_TIMEOUT_MS ?? 30_000);
+
+const estimateSchema = z.object({
+  calories: z.coerce.number().min(0),
+  protein: z.coerce.number().min(0),
+  carbs: z.coerce.number().min(0),
+  fat: z.coerce.number().min(0),
+});
+
+const PROMPT = `You are a nutrition estimation assistant. Look at the food (photo and/or description provided) and estimate its nutritional content as best you can.
+
+Respond with ONLY a JSON object in exactly this shape, no other text:
+{"calories": <number>, "protein": <number, grams>, "carbs": <number, grams>, "fat": <number, grams>}
+
+If a description is given without a clear serving size, assume a typical single serving. Give your best numeric estimate even if uncertain - never respond with null or a range.`;
+
+/** Downloads the photo and inlines it as a data URL, since the model runs on
+ * Hugging Face's infrastructure and can't reach a local/private photo URL. */
+async function fetchImageAsDataUrl(photoUrl: string): Promise<string> {
+  const res = await fetch(photoUrl);
+  if (!res.ok) {
+    throw new NutritionInputError(`Could not load the photo for estimation (HTTP ${res.status}).`);
+  }
+  const contentType = res.headers.get("content-type") ?? "image/jpeg";
+  const buffer = await res.arrayBuffer();
+  const base64 = Buffer.from(buffer).toString("base64");
+  return `data:${contentType};base64,${base64}`;
+}
+
+function buildPrompt(description?: string): string {
+  if (!description) return PROMPT;
+  return `${PROMPT}\n\nDescription provided by the user: "${description}"`;
+}
+
+/** Extracts the first top-level JSON object from a string, tolerating extra prose around it. */
+function extractJsonObject(text: string): unknown {
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start === -1 || end === -1 || end < start) {
+    throw new NutritionParseError();
+  }
+  try {
+    return JSON.parse(text.slice(start, end + 1));
+  } catch {
+    throw new NutritionParseError();
+  }
+}
+
+export const huggingfaceProvider: NutritionProvider = {
+  async estimate(input: NutritionInput): Promise<NutritionEstimate> {
+    const { photoUrl, description } = input;
+    if (!photoUrl && !description?.trim()) {
+      throw new NutritionInputError();
+    }
+    if (!HF_API_KEY) {
+      throw new NutritionUnavailableError(
+        'Missing HUGGINGFACE_API_KEY. Create one at https://huggingface.co/settings/tokens with ' +
+          '"Make calls to Inference Providers" permission.',
+      );
+    }
+
+    const content: Array<Record<string, unknown>> = [{ type: "text", text: buildPrompt(description) }];
+    if (photoUrl) {
+      const dataUrl = await fetchImageAsDataUrl(photoUrl);
+      content.push({ type: "image_url", image_url: { url: dataUrl } });
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
+    let response: Response;
+    try {
+      response = await fetch(`${HF_BASE_URL}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${HF_API_KEY}`,
+        },
+        body: JSON.stringify({
+          model: HF_MODEL,
+          messages: [{ role: "user", content }],
+        }),
+        signal: controller.signal,
+      });
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") {
+        throw new NutritionTimeoutError();
+      }
+      throw new NutritionUnavailableError();
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      throw new NutritionUnavailableError(
+        `Hugging Face returned an error (HTTP ${response.status}): ${body.slice(0, 200)}`,
+      );
+    }
+
+    const payload = (await response.json()) as {
+      choices?: Array<{ message?: { content?: string } }>;
+    };
+    const text = payload.choices?.[0]?.message?.content;
+    if (!text) {
+      throw new NutritionParseError();
+    }
+
+    const parsedJson = extractJsonObject(text);
+    const result = estimateSchema.safeParse(parsedJson);
+    if (!result.success) {
+      throw new NutritionParseError();
+    }
+
+    return result.data;
+  },
+};

@@ -1,0 +1,5 @@
+# Supabase local dev artifacts - not meant to be committed
+.branches
+.temp
+.env
+snippets
