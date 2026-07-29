@@ -12,7 +12,10 @@ import type { NutritionEstimate, NutritionInput, NutritionProvider } from "../ty
 // server of your own, so it's the option to use once this app is deployed
 // (e.g. on Vercel) rather than run against a local machine.
 const HF_API_KEY = process.env.HUGGINGFACE_API_KEY;
-const HF_MODEL = process.env.HUGGINGFACE_MODEL ?? "Qwen/Qwen2.5-VL-3B-Instruct";
+// Smaller VLMs (e.g. the 3B variant) aren't routable through any Inference
+// Provider on a typical pay-as-you-go HF account - only larger checkpoints
+// like this one are, so that's the safe fallback if the env var is unset.
+const HF_MODEL = process.env.HUGGINGFACE_MODEL ?? "Qwen/Qwen2.5-VL-72B-Instruct";
 const HF_BASE_URL = "https://router.huggingface.co/v1";
 const TIMEOUT_MS = Number(process.env.ESTIMATE_TIMEOUT_MS ?? 30_000);
 
