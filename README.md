@@ -140,9 +140,11 @@ The Log view (`/`) groups meals by local calendar day via `lib/meals/grouping.ts
 - `lib/nutrition/` - the `estimateNutrition()` seam and its providers (Ollama, Hugging Face) -
   swap between them via the `NUTRITION_PROVIDER` env var
 - `lib/meals/` - Supabase data access (repository) and day-grouping/formatting helpers
+  (`DAILY_CALORIE_GOAL`, `groupMealsByDay`, date/time formatters)
 - `lib/supabase/server.ts` - server-only Supabase client (secret key)
 - `supabase/migrations/` - the `meals` table and `meal-photos` Storage bucket, both with RLS
   enabled and no anon/authenticated policies (access only via the secret key, server-side)
+- `*.test.ts` + `vitest.config.ts` - unit/API regression tests (see [Testing](#testing))
 
 ## Notes on data access
 
