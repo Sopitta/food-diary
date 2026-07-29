@@ -29,11 +29,14 @@ function hfCompletion(content: string): Response {
 describe("huggingfaceProvider", () => {
   const originalFetch = globalThis.fetch;
   let fetchMock: ReturnType<typeof vi.fn>;
+  const SUPABASE_URL = "http://127.0.0.1:54321";
+  const SIGNED_PHOTO_URL = `${SUPABASE_URL}/storage/v1/object/sign/meal-photos/abc.jpg?token=test`;
 
   beforeEach(() => {
     fetchMock = vi.fn();
     globalThis.fetch = fetchMock as typeof fetch;
     process.env.HUGGINGFACE_API_KEY = "test-hf-key";
+    process.env.NEXT_PUBLIC_SUPABASE_URL = SUPABASE_URL;
     delete process.env.HUGGINGFACE_MODEL;
   });
 
@@ -41,6 +44,7 @@ describe("huggingfaceProvider", () => {
     globalThis.fetch = originalFetch;
     delete process.env.HUGGINGFACE_API_KEY;
     delete process.env.HUGGINGFACE_MODEL;
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL;
   });
 
   it("exports the routable 72B default (not the unroutable 3B checkpoint)", () => {
@@ -146,12 +150,12 @@ describe("huggingfaceProvider", () => {
       .mockResolvedValueOnce(hfCompletion(JSON.stringify(ESTIMATE)));
 
     await huggingfaceProvider.estimate({
-      photoUrl: "https://example.com/meal.png",
+      photoUrl: SIGNED_PHOTO_URL,
       description: "sushi",
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("https://example.com/meal.png");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(SIGNED_PHOTO_URL);
 
     const [, completionInit] = fetchMock.mock.calls[1] as [string, RequestInit];
     const body = JSON.parse(String(completionInit.body)) as {
@@ -159,5 +163,15 @@ describe("huggingfaceProvider", () => {
     };
     const imagePart = body.messages[0].content.find((part) => part.type === "image_url");
     expect(imagePart?.image_url?.url).toMatch(/^data:image\/png;base64,/);
+  });
+
+  it("refuses to fetch photo URLs outside this app's Supabase storage (SSRF)", async () => {
+    await expect(
+      huggingfaceProvider.estimate({
+        photoUrl: "http://169.254.169.254/latest/meta-data/",
+        description: "probe",
+      }),
+    ).rejects.toBeInstanceOf(NutritionInputError);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
