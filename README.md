@@ -89,9 +89,10 @@ deploying (or any time you want a hosted model instead), switch to Hugging Face:
 
 No other code changes are needed - `lib/nutrition/estimateNutrition.ts` picks the provider based
 on `NUTRITION_PROVIDER` alone. Both providers call Hugging Face / Ollama through the same
-`NutritionProvider` interface in `lib/nutrition/types.ts`. To add another backend (OpenAI,
-Anthropic, etc.), copy the pattern in `lib/nutrition/providers/huggingfaceProvider.ts` and
-register it in `getProvider()`.
+`NutritionProvider` interface in `lib/nutrition/types.ts`. The Hugging Face fallback model is
+exported as `DEFAULT_HUGGINGFACE_MODEL` from `huggingfaceProvider.ts` (tests assert this stays
+routable). To add another backend (OpenAI, Anthropic, etc.), copy the pattern in
+`lib/nutrition/providers/huggingfaceProvider.ts` and register it in `getProvider()`.
 
 ### Provider constraints
 
@@ -109,17 +110,28 @@ Adding a meal on `/add` runs this client → API chain (see `components/MealForm
 
 1. **Upload (optional)** — `POST /api/upload` with multipart field `photo` (max 10MB). Stores the
    file in the private `meal-photos` bucket and returns `{ path, url }` where `url` is a
-   short-lived signed URL (~1 hour).
+   short-lived signed URL (~1 hour). Oversized files return HTTP 413.
 2. **Estimate** — `POST /api/estimate` with `{ photoUrl?, description? }` (at least one required).
    Routes through `estimateNutrition()` → the active provider. Success body:
-   `{ calories, protein, carbs, fat }`. Errors map to HTTP 422 / 503 / 504 via
-   `lib/nutrition/errors.ts`.
+   `{ calories, protein, carbs, fat }`. Error mapping (`lib/nutrition/errors.ts`):
+   `NutritionInputError` / `NutritionParseError` → 422, `NutritionUnavailableError` → 503,
+   `NutritionTimeoutError` → 504, unknown → 500.
 3. **Save** — `POST /api/meals` with the estimate plus optional `photoPath`, `description`, and
-   `mealType` (`breakfast` \| `lunch` \| `dinner` \| `snack` \| `drink`). Persists via
-   `lib/meals/repository.ts`.
+   `mealType` (`breakfast` \| `lunch` \| `dinner` \| `snack` \| `drink`). Requires at least a
+   photo path or non-empty description, a valid `mealType` when present, and finite numbers for
+   all four macros. Persists via `lib/meals/repository.ts` (201 on success).
+
+**Re-estimate / retry:** After a successful upload, `MealForm` keeps both the Storage `path` and
+the signed `url` in component state. A second estimate (error retry or the "Re-estimate" button)
+reuses that signed URL and does **not** re-upload. Clearing or replacing the photo resets both.
+If the signed URL has expired (~1 hour), upload again before estimating.
 
 Other meal APIs: `GET /api/meals` (list, newest first), `PATCH /api/meals/[id]` (rename
-description), `DELETE /api/meals/[id]` (row + photo cleanup).
+description; empty name → 400), `DELETE /api/meals/[id]` (row + photo cleanup; unknown id → 404).
+
+The Log view (`/`) groups meals by local calendar day via `lib/meals/grouping.ts`
+(`groupMealsByDay`) and shows progress against a fixed `DAILY_CALORIE_GOAL` of 1800 kcal
+(not yet a user setting).
 
 ## Project structure
 
@@ -151,13 +163,35 @@ minted on read (`listMeals` / upload response) and expire after about an hour.
 | HF estimate fails with HTTP 4xx mentioning the model | Model not routable via Inference Providers | Use the default `Qwen/Qwen2.5-VL-72B-Instruct`, or pick a VLM listed under [Inference Providers](https://huggingface.co/settings/inference-providers) for your account — smaller checkpoints often aren't available |
 | HF estimate: missing API key | `HUGGINGFACE_API_KEY` unset while `NUTRITION_PROVIDER=huggingface` | Create a fine-grained token with "Make calls to Inference Providers" and set it in env |
 | Supabase client errors on boot / upload | Missing or wrong `NEXT_PUBLIC_SUPABASE_URL` / `SUPABASE_SECRET_KEY` | Run `npx supabase status` and copy `API_URL` + `SECRET_KEY` (`sb_secret_...`) into `.env.local` |
-| Photo preview works but estimate can't load the image | Signed URL expired or Storage unreachable from the server | Re-upload / re-estimate; ensure the Next.js server can reach local Supabase (`127.0.0.1:54321`) |
+| Photo preview works but estimate can't load the image | Signed URL expired or Storage unreachable from the server | Clear the photo and upload again (retry alone can't mint a fresh signed URL); ensure the Next.js server can reach local Supabase (`127.0.0.1:54321`) |
+| Re-estimate after an error ignores the photo | Client bug (pre-fix) or expired URL | Current `MealForm` caches `uploadedUrl` with `uploadedPath`; if still wrong, hard-refresh and re-upload |
+
+## Testing
+
+Vitest covers the high-risk server paths added/locked in recently (no browser/E2E suite yet):
+
+```bash
+npm test          # single run (CI-friendly)
+npm run test:watch
+```
+
+| Area | Files | What it locks in |
+| --- | --- | --- |
+| Provider routing | `lib/nutrition/estimateNutrition.test.ts` | Default `ollama`, `NUTRITION_PROVIDER=huggingface`, unknown provider rejection |
+| Hugging Face provider | `lib/nutrition/providers/huggingfaceProvider.test.ts` | `DEFAULT_HUGGINGFACE_MODEL` (`Qwen/Qwen2.5-VL-72B-Instruct`), env override, auth/timeout/parse errors, image inlining |
+| Estimate API | `app/api/estimate/route.test.ts` | JSON body + error → HTTP status mapping |
+| Create meal API | `app/api/meals/route.test.ts` | Macro / mealType / photo-or-description validation |
+| Log grouping | `lib/meals/grouping.test.ts`, `lib/meals/types.test.ts` | Day buckets, totals, date/time labels, `isMealType` |
+
+Config: `vitest.config.ts` (Node environment, `**/*.test.ts`, `@/` alias). Tests mock providers and
+Supabase; they do not require Ollama or a running database.
 
 ## Useful commands
 
 ```bash
-npx supabase status   # print local API URL / keys again
-npx supabase stop     # stop the local stack
-npx supabase db reset # recreate the local DB and reapply migrations
+npm test               # run unit/API regression tests
+npx supabase status    # print local API URL / keys again
+npx supabase stop      # stop the local stack
+npx supabase db reset  # recreate the local DB and reapply migrations
 ollama list            # see which local models are available
 ```
