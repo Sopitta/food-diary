@@ -1,19 +1,17 @@
 import Link from "next/link";
 import { listMeals } from "@/lib/meals/repository";
-import { formatDateLabel, formatShortDate, groupMealsByDay } from "@/lib/meals/grouping";
-import DayOverviewCard from "@/components/DayOverviewCard";
-import MealCard from "@/components/MealCard";
+import type { Meal } from "@/lib/meals/types";
+import MealLog from "@/components/MealLog";
 import { PlusIcon } from "@/components/icons";
 
 export const dynamic = "force-dynamic";
 
 export default async function LogPage() {
-  let dayGroups: ReturnType<typeof groupMealsByDay> = [];
+  let meals: Meal[] = [];
   let loadError: string | null = null;
 
   try {
-    const meals = await listMeals();
-    dayGroups = groupMealsByDay(meals);
+    meals = await listMeals();
   } catch (err) {
     loadError = err instanceof Error ? err.message : "Failed to load meals.";
   }
@@ -47,47 +45,7 @@ export default async function LogPage() {
           </div>
         )}
 
-        {!loadError && dayGroups.length === 0 && (
-          <div className="flex flex-1 flex-col items-center justify-center gap-3 py-16 text-center">
-            <p className="text-4xl">🥗</p>
-            <p className="text-sm text-ink/60">No meals logged yet. Add your first meal to see it here.</p>
-            <Link
-              href="/add"
-              className="mt-2 rounded-full bg-ink px-5 py-2.5 text-sm font-bold text-paper"
-            >
-              Add Meal
-            </Link>
-          </div>
-        )}
-
-        {!loadError &&
-          dayGroups.map((group) => (
-            <section key={group.dateKey} className="flex flex-col gap-4">
-              <div className="flex items-baseline justify-between">
-                <h1 className="text-3xl font-extrabold tracking-tight">{formatDateLabel(group.dateKey)}</h1>
-                <span className="text-sm font-medium text-ink/50">{formatShortDate(group.dateKey)}</span>
-              </div>
-              <DayOverviewCard totals={group.totals} />
-              <div className="flex flex-col gap-3">
-                {group.meals.map((meal) => (
-                  <MealCard key={meal.id} meal={meal} />
-                ))}
-              </div>
-            </section>
-          ))}
-
-        {!loadError && dayGroups.length > 0 && (
-          <div className="mt-2 flex items-center gap-3">
-            <div className="h-px flex-1 bg-ink/30" />
-            <Link
-              href="/add"
-              className="flex items-center gap-1.5 rounded-full border-2 border-ink px-5 py-2.5 text-sm font-bold"
-            >
-              <PlusIcon width={14} height={14} /> Log another meal
-            </Link>
-            <div className="h-px flex-1 bg-ink/30" />
-          </div>
-        )}
+        {!loadError && <MealLog meals={meals} />}
       </main>
     </>
   );
