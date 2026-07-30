@@ -45,6 +45,34 @@ describe("assertAllowedPhotoUrl", () => {
     delete process.env.NEXT_PUBLIC_SUPABASE_URL;
     expect(() => assertAllowedPhotoUrl(SIGNED_PHOTO_URL)).toThrow(NutritionInputError);
   });
+
+  it("rejects malformed photo URLs and an invalid Supabase base URL", () => {
+    expect(() => assertAllowedPhotoUrl("not a url")).toThrow(NutritionInputError);
+    process.env.NEXT_PUBLIC_SUPABASE_URL = "also not a url";
+    expect(() => assertAllowedPhotoUrl(SIGNED_PHOTO_URL)).toThrow(NutritionInputError);
+  });
+
+  it("rejects lookalike hosts and userinfo tricks that change the origin", () => {
+    expect(() =>
+      assertAllowedPhotoUrl(
+        "http://127.0.0.1:54321.evil.example/storage/v1/object/sign/meal-photos/x.jpg",
+      ),
+    ).toThrow(NutritionInputError);
+    expect(() =>
+      assertAllowedPhotoUrl(
+        "http://127.0.0.1:54321@evil.example/storage/v1/object/sign/meal-photos/x.jpg",
+      ),
+    ).toThrow(NutritionInputError);
+  });
+
+  it("rejects signed-path lookalikes that omit the required prefix boundary", () => {
+    expect(() =>
+      assertAllowedPhotoUrl(`${SUPABASE_URL}/storage/v1/object/sign`),
+    ).toThrow(NutritionInputError);
+    expect(() =>
+      assertAllowedPhotoUrl(`${SUPABASE_URL}/storage/v1/object/signed/meal-photos/x.jpg`),
+    ).toThrow(NutritionInputError);
+  });
 });
 
 describe("fetchPhotoAsBase64 / fetchPhotoAsDataUrl", () => {
@@ -109,5 +137,22 @@ describe("fetchPhotoAsBase64 / fetchPhotoAsDataUrl", () => {
     );
 
     await expect(fetchPhotoAsBase64(SIGNED_PHOTO_URL)).rejects.toBeInstanceOf(NutritionInputError);
+  });
+
+  it("maps non-OK photo downloads to NutritionInputError", async () => {
+    fetchMock.mockResolvedValueOnce(new Response("gone", { status: 403 }));
+    await expect(fetchPhotoAsBase64(SIGNED_PHOTO_URL)).rejects.toBeInstanceOf(NutritionInputError);
+  });
+
+  it("defaults content-type to image/jpeg when the response omits it", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(Buffer.from("img"), {
+        status: 200,
+      }),
+    );
+
+    const { contentType, base64 } = await fetchPhotoAsBase64(SIGNED_PHOTO_URL);
+    expect(contentType).toBe("image/jpeg");
+    expect(base64).toBe(Buffer.from("img").toString("base64"));
   });
 });
