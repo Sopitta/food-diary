@@ -8,6 +8,8 @@ import {
 import { ollamaProvider } from "./ollamaProvider";
 
 const ESTIMATE = { calories: 320, protein: 18, carbs: 35, fat: 10 };
+const SUPABASE_URL = "http://127.0.0.1:54321";
+const SIGNED_PHOTO_URL = `${SUPABASE_URL}/storage/v1/object/sign/meal-photos/abc.jpg?token=test`;
 
 function jsonResponse(body: unknown, init?: ResponseInit): Response {
   return new Response(JSON.stringify(body), {
@@ -24,10 +26,12 @@ describe("ollamaProvider", () => {
   beforeEach(() => {
     fetchMock = vi.fn();
     globalThis.fetch = fetchMock as typeof fetch;
+    process.env.NEXT_PUBLIC_SUPABASE_URL = SUPABASE_URL;
   });
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL;
   });
 
   it("rejects input with neither photo nor description", async () => {
@@ -69,7 +73,7 @@ describe("ollamaProvider", () => {
       .mockResolvedValueOnce(jsonResponse({ response: JSON.stringify(ESTIMATE) }));
 
     await ollamaProvider.estimate({
-      photoUrl: "https://example.com/meal.jpg",
+      photoUrl: SIGNED_PHOTO_URL,
       description: "bowl",
     });
 
@@ -125,7 +129,14 @@ describe("ollamaProvider", () => {
   it("throws NutritionInputError when the photo cannot be downloaded", async () => {
     fetchMock.mockResolvedValueOnce(new Response("gone", { status: 404 }));
     await expect(
-      ollamaProvider.estimate({ photoUrl: "https://example.com/missing.jpg" }),
+      ollamaProvider.estimate({ photoUrl: SIGNED_PHOTO_URL }),
     ).rejects.toBeInstanceOf(NutritionInputError);
+  });
+
+  it("throws NutritionInputError for photo URLs outside this app's Supabase storage (SSRF)", async () => {
+    await expect(
+      ollamaProvider.estimate({ photoUrl: "https://example.com/meal.jpg" }),
+    ).rejects.toBeInstanceOf(NutritionInputError);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
