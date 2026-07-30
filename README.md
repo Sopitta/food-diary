@@ -101,7 +101,7 @@ register it in `getProvider()`.
 | Where it runs | Local process (`OLLAMA_BASE_URL`, default `http://localhost:11434`) | Hosted OpenAI-compatible API at `https://router.huggingface.co/v1` |
 | Model env | `OLLAMA_MODEL` (default `llava`) — must be vision-capable and already pulled | `HUGGINGFACE_MODEL` (default `Qwen/Qwen2.5-VL-72B-Instruct`) — must be routable on your account |
 | Auth | None | `HUGGINGFACE_API_KEY` required |
-| Photos | Fetched server-side and sent as base64 | Fetched server-side and inlined as a data URL (HF can't reach private/local signed URLs) |
+| Photos | Fetched server-side via `lib/nutrition/fetchPhoto.ts` (allowlisted signed Supabase URLs only), sent as base64 | Same allowlisted fetch, then inlined as a data URL (HF can't reach private/local signed URLs itself) |
 | Timeout | `ESTIMATE_TIMEOUT_MS` (code default 30s; `.env.local.example` uses 60s for cold local models) | Same env var |
 
 ## Deployment (Vercel)
@@ -133,8 +133,9 @@ npm test        # run the Vitest suite once
 npm run test:watch
 ```
 
-Covers the `estimateNutrition()` provider routing, the Hugging Face provider (model
-default/override, error mapping, photo-to-data-URL inlining), meal day-grouping/totals, and the
+Covers `estimateNutrition()` provider routing, the Hugging Face provider (model
+default/override, error mapping, photo-to-data-URL inlining), photo URL allowlisting /
+size caps in `lib/nutrition/fetchPhoto.ts`, meal day-grouping/totals, and the
 `/api/estimate` and `/api/meals` route handlers.
 
 ## Meal logging workflow
@@ -143,7 +144,8 @@ Adding a meal on `/add` runs this client → API chain (see `components/MealForm
 
 1. **Upload (optional)** — `POST /api/upload` with multipart field `photo` (max 10MB). Stores the
    file in the private `meal-photos` bucket and returns `{ path, url }` where `url` is a
-   short-lived signed URL (~1 hour).
+   short-lived signed URL (~1 hour). The form caches both `path` and `url` so re-estimate /
+   retry can reuse the photo without re-uploading.
 2. **Estimate** — `POST /api/estimate` with `{ photoUrl?, description? }` (at least one required).
    Routes through `estimateNutrition()` → the active provider. Success body:
    `{ calories, protein, carbs, fat }`. Errors map to HTTP 422 / 503 / 504 via
@@ -155,12 +157,38 @@ Adding a meal on `/add` runs this client → API chain (see `components/MealForm
 Other meal APIs: `GET /api/meals` (list, newest first), `PATCH /api/meals/[id]` (rename
 description), `DELETE /api/meals/[id]` (row + photo cleanup).
 
+### Photo URL allowlist (estimate)
+
+`photoUrl` on `POST /api/estimate` is client-supplied. Both providers download it through
+[`lib/nutrition/fetchPhoto.ts`](lib/nutrition/fetchPhoto.ts) before calling the model — they do
+**not** fetch arbitrary URLs.
+
+Constraints (enforced before any network read of the image):
+
+- Origin must match `NEXT_PUBLIC_SUPABASE_URL` exactly (same host + scheme + port).
+- Path must start with `/storage/v1/object/sign/` (signed object URLs only — public or other
+  Storage paths are rejected).
+- Download is capped at **10MB** (`MAX_ESTIMATE_PHOTO_BYTES`), matching the upload route, so
+  estimate cannot pull larger blobs than upload accepts.
+- Failures throw `NutritionInputError` → HTTP **422** (e.g. wrong host, non-signed path,
+  missing `NEXT_PUBLIC_SUPABASE_URL`, photo too large, or HTTP error loading the signed URL).
+
+Example of an accepted URL shape (token and object key vary):
+
+```text
+http://127.0.0.1:54321/storage/v1/object/sign/meal-photos/<object>?token=<jwt>
+```
+
+Callers should pass the `url` from `/api/upload` (or a freshly signed URL from meal list), not a
+raw Storage path, not a public object URL, and not an external image link.
+
 ## Project structure
 
 - `app/` - routes: `/` (Log view), `/add` (meal entry form), `/api/estimate`, `/api/upload`,
   `/api/meals`, `/api/meals/[id]`
-- `lib/nutrition/` - the `estimateNutrition()` seam and its providers (Ollama, Hugging Face) -
-  swap between them via the `NUTRITION_PROVIDER` env var
+- `lib/nutrition/` - the `estimateNutrition()` seam, providers (Ollama, Hugging Face), and
+  `fetchPhoto.ts` (signed-URL allowlist + size cap used by every provider) - swap backends via
+  the `NUTRITION_PROVIDER` env var
 - `lib/meals/` - Supabase data access (repository) and day-grouping/formatting helpers
 - `lib/supabase/server.ts` - server-only Supabase client (secret key)
 - `supabase/migrations/` - the `meals` table and `meal-photos` Storage bucket, both with RLS
@@ -186,6 +214,9 @@ minted on read (`listMeals` / upload response) and expire after about an hour.
 | HF estimate: missing API key | `HUGGINGFACE_API_KEY` unset while `NUTRITION_PROVIDER=huggingface` | Create a fine-grained token with "Make calls to Inference Providers" and set it in env |
 | Supabase client errors on boot / upload | Missing or wrong `NEXT_PUBLIC_SUPABASE_URL` / `SUPABASE_SECRET_KEY` | Run `npx supabase status` and copy `API_URL` + `SECRET_KEY` (`sb_secret_...`) into `.env.local` |
 | Photo preview works but estimate can't load the image | Signed URL expired or Storage unreachable from the server | Re-upload / re-estimate; ensure the Next.js server can reach local Supabase (`127.0.0.1:54321`) |
+| Estimate 422: "Photo URL must be a signed URL from this app's storage" | `photoUrl` is not a signed object URL on this project's Supabase origin (SSRF allowlist) | Pass the `url` from `POST /api/upload` / meal list — must be `{NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/sign/...`. External, public-bucket, or path-only values are rejected |
+| Estimate 422: "Photo is too large to estimate (max 10MB)" | Signed object larger than the download cap | Re-upload a smaller image (upload also enforces 10MB) |
+| Estimate 422 about missing `NEXT_PUBLIC_SUPABASE_URL` | Env unset while estimating with a photo | Set `NEXT_PUBLIC_SUPABASE_URL` to the same API URL used for upload (allowlist can't verify otherwise) |
 
 ## Useful commands
 
