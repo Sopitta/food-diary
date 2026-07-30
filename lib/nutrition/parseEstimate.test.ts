@@ -14,6 +14,12 @@ describe("parseEstimate", () => {
     ).toEqual({ calories: 450, protein: 30.5, carbs: 40, fat: 15 });
   });
 
+  it("accepts trimmed numeric strings and zero macros", () => {
+    expect(
+      parseEstimate({ calories: " 120 ", protein: "0", carbs: 0, fat: "0.0" }),
+    ).toEqual({ calories: 120, protein: 0, carbs: 0, fat: 0 });
+  });
+
   it("rejects null macros instead of coercing them to 0", () => {
     expect(
       parseEstimate({ calories: null, protein: null, carbs: null, fat: null }),
@@ -29,6 +35,9 @@ describe("parseEstimate", () => {
       parseEstimate({ calories: "", protein: 1, carbs: 1, fat: 1 }),
     ).toBeNull();
     expect(
+      parseEstimate({ calories: "   ", protein: 1, carbs: 1, fat: 1 }),
+    ).toBeNull();
+    expect(
       parseEstimate({ calories: true, protein: 1, carbs: 1, fat: 1 }),
     ).toBeNull();
     expect(
@@ -36,12 +45,25 @@ describe("parseEstimate", () => {
     ).toBeNull();
   });
 
-  it("rejects negatives and non-numeric strings", () => {
+  it("rejects negatives, non-numeric strings, and non-finite numbers", () => {
     expect(
       parseEstimate({ calories: -1, protein: 1, carbs: 1, fat: 1 }),
     ).toBeNull();
     expect(
       parseEstimate({ calories: "450kcal", protein: 1, carbs: 1, fat: 1 }),
     ).toBeNull();
+    expect(
+      parseEstimate({ calories: Number.NaN, protein: 1, carbs: 1, fat: 1 }),
+    ).toBeNull();
+    expect(
+      parseEstimate({ calories: Number.POSITIVE_INFINITY, protein: 1, carbs: 1, fat: 1 }),
+    ).toBeNull();
+  });
+
+  it("rejects missing fields and non-object payloads", () => {
+    expect(parseEstimate({ calories: 1, protein: 1, carbs: 1 })).toBeNull();
+    expect(parseEstimate(null)).toBeNull();
+    expect(parseEstimate("not-an-object")).toBeNull();
+    expect(parseEstimate([450, 30, 40, 15])).toBeNull();
   });
 });

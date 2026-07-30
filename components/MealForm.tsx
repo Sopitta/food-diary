@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
+import { defaultMealType } from "@/lib/meals/defaultMealType";
 import { resolveEstimatePhoto } from "@/lib/meals/estimatePhoto";
 import { MEAL_TYPES, type MealType } from "@/lib/meals/types";
 import { ArrowLeftIcon, CameraIcon, ImageIcon, MEAL_TYPE_META, SparklesIcon } from "./icons";
@@ -15,14 +16,6 @@ interface Estimate {
 }
 
 type Stage = "input" | "estimating" | "review" | "saving";
-
-function defaultMealType(): MealType {
-  const hour = new Date().getHours();
-  if (hour < 11) return "breakfast";
-  if (hour < 15) return "lunch";
-  if (hour < 21) return "dinner";
-  return "snack";
-}
 
 async function parseErrorMessage(res: Response, fallback: string): Promise<string> {
   try {
