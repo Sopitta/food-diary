@@ -62,7 +62,7 @@ describe("ollamaProvider", () => {
     expect(body.prompt).toContain("oatmeal");
   });
 
-  it("inlines photo bytes as base64 before calling Ollama", async () => {
+  it("inlines allowlisted photo bytes as base64 before calling Ollama", async () => {
     fetchMock
       .mockResolvedValueOnce(
         new Response(new Uint8Array([9, 8, 7]), {
@@ -77,9 +77,20 @@ describe("ollamaProvider", () => {
       description: "bowl",
     });
 
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(SIGNED_PHOTO_URL);
     const [, init] = fetchMock.mock.calls[1] as [string, RequestInit];
     const body = JSON.parse(String(init.body)) as { images: string[] };
     expect(body.images).toEqual([Buffer.from([9, 8, 7]).toString("base64")]);
+  });
+
+  it("refuses to fetch photo URLs outside this app's Supabase storage (SSRF)", async () => {
+    await expect(
+      ollamaProvider.estimate({
+        photoUrl: "http://169.254.169.254/latest/meta-data/",
+        description: "probe",
+      }),
+    ).rejects.toBeInstanceOf(NutritionInputError);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("parses JSON wrapped in prose", async () => {
@@ -96,9 +107,46 @@ describe("ollamaProvider", () => {
     );
   });
 
+  it("throws NutritionParseError when braces wrap non-JSON content", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ response: "prefix {not-json} suffix" }));
+    await expect(ollamaProvider.estimate({ description: "x" })).rejects.toBeInstanceOf(
+      NutritionParseError,
+    );
+  });
+
+  it("throws NutritionParseError when the generate payload omits response text", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({}));
+    await expect(ollamaProvider.estimate({ description: "x" })).rejects.toBeInstanceOf(
+      NutritionParseError,
+    );
+  });
+
   it("throws NutritionParseError when required fields are missing", async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ response: JSON.stringify({ calories: 1 }) }));
     await expect(ollamaProvider.estimate({ description: "x" })).rejects.toBeInstanceOf(
+      NutritionParseError,
+    );
+  });
+
+  it("throws NutritionParseError when the model returns null macros (not coerce to 0)", async () => {
+    // Default provider must fail closed on the same abstention shape as Hugging Face.
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        response: JSON.stringify({ calories: 500, protein: null, carbs: 40, fat: null }),
+      }),
+    );
+    await expect(ollamaProvider.estimate({ description: "uncertain macros" })).rejects.toBeInstanceOf(
+      NutritionParseError,
+    );
+  });
+
+  it("throws NutritionParseError when macros are empty strings or booleans", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        response: JSON.stringify({ calories: "", protein: false, carbs: true, fat: 10 }),
+      }),
+    );
+    await expect(ollamaProvider.estimate({ description: "coercion traps" })).rejects.toBeInstanceOf(
       NutritionParseError,
     );
   });
@@ -126,17 +174,10 @@ describe("ollamaProvider", () => {
     );
   });
 
-  it("throws NutritionInputError when the photo cannot be downloaded", async () => {
+  it("throws NutritionInputError when an allowlisted photo cannot be downloaded", async () => {
     fetchMock.mockResolvedValueOnce(new Response("gone", { status: 404 }));
     await expect(
       ollamaProvider.estimate({ photoUrl: SIGNED_PHOTO_URL }),
     ).rejects.toBeInstanceOf(NutritionInputError);
-  });
-
-  it("throws NutritionInputError for photo URLs outside this app's Supabase storage (SSRF)", async () => {
-    await expect(
-      ollamaProvider.estimate({ photoUrl: "https://example.com/meal.jpg" }),
-    ).rejects.toBeInstanceOf(NutritionInputError);
-    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

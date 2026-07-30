@@ -83,4 +83,18 @@ describe("POST /api/upload", () => {
     const body = (await response.json()) as { error: string };
     expect(body.error).toContain("Failed to upload photo");
   });
+
+  it("returns 502 when signing the uploaded object fails", async () => {
+    upload.mockResolvedValueOnce({ error: null });
+    createSignedUrl.mockResolvedValueOnce({
+      data: null,
+      error: new Error("sign failed"),
+    });
+
+    const file = new File([new Uint8Array([1])], "x.png", { type: "image/png" });
+    const response = await POST(postPhoto(file));
+    expect(response.status).toBe(502);
+    const body = (await response.json()) as { error: string };
+    expect(body.error).toContain("Failed to upload photo");
+  });
 });
