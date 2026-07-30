@@ -108,7 +108,7 @@ routable). To add another backend (OpenAI, Anthropic, etc.), copy the pattern in
 | Where it runs | Local process (`OLLAMA_BASE_URL`, default `http://localhost:11434`) | Hosted OpenAI-compatible API at `https://router.huggingface.co/v1` |
 | Model env | `OLLAMA_MODEL` (default `llava`) — must be vision-capable and already pulled | `HUGGINGFACE_MODEL` (default `Qwen/Qwen2.5-VL-72B-Instruct`) — must be routable on your account |
 | Auth | None | `HUGGINGFACE_API_KEY` required |
-| Photos | Fetched server-side and sent as base64 | Fetched server-side and inlined as a data URL (HF can't reach private/local signed URLs) |
+| Photos | Fetched server-side via `lib/nutrition/fetchPhoto.ts` (allowlisted signed Supabase URLs only), sent as base64 | Same allowlisted fetch, then inlined as a data URL (HF can't reach private/local signed URLs itself) |
 | Timeout | `ESTIMATE_TIMEOUT_MS` (code default 30s; `.env.local.example` uses 60s for cold local models) | Same env var |
 
 ## Deployment (Vercel)
@@ -146,9 +146,15 @@ npm run test:watch
 | Area | Files | What it locks in |
 | --- | --- | --- |
 | Provider routing | `lib/nutrition/estimateNutrition.test.ts` | Default `ollama`, `NUTRITION_PROVIDER=huggingface`, unknown provider rejection |
-| Hugging Face provider | `lib/nutrition/providers/huggingfaceProvider.test.ts` | `DEFAULT_HUGGINGFACE_MODEL` (`Qwen/Qwen2.5-VL-72B-Instruct`), env override, auth/timeout/parse errors, image inlining |
+| Hugging Face provider | `lib/nutrition/providers/huggingfaceProvider.test.ts` | `DEFAULT_HUGGINGFACE_MODEL` (`Qwen/Qwen2.5-VL-72B-Instruct`), env override, auth/timeout/parse errors, image inlining, null-macro rejection |
+| Ollama provider | `lib/nutrition/providers/ollamaProvider.test.ts` | Auth-free call shape, timeout/unavailable mapping, parse failures, allowlisted photo base64 |
+| Photo URL allowlist | `lib/nutrition/fetchPhoto.test.ts` | Origin/path allowlist, 10MB download cap, signed-URL-only fetches |
+| Macro JSON parsing | `lib/nutrition/parseEstimate.test.ts` | Accepts numbers/numeric strings; rejects null, `""`, booleans, negatives |
+| Estimate photo retry helper | `lib/meals/estimatePhoto.test.ts` | `resolveEstimatePhoto` reuses cached signed URL; only uploads when needed |
 | Estimate API | `app/api/estimate/route.test.ts` | JSON body + error → HTTP status mapping |
-| Create meal API | `app/api/meals/route.test.ts` | Macro / mealType / photo-or-description validation |
+| Upload API | `app/api/upload/route.test.ts` | Missing/empty file → 400, oversized → 413, storage failure → 502 |
+| Meals APIs | `app/api/meals/route.test.ts`, `app/api/meals/[id]/route.test.ts` | Create validation (incl. invalid JSON / non-finite macros), list failures, PATCH/DELETE status mapping |
+| Repository | `lib/meals/repository.test.ts` | Insert/list, delete Storage cleanup + not-found, update description |
 | Log grouping | `lib/meals/grouping.test.ts`, `lib/meals/types.test.ts` | Day buckets, totals, date/time labels, `isMealType` |
 
 Config: `vitest.config.ts` (Node environment, `**/*.test.ts`, `@/` alias). Tests mock providers and
@@ -160,41 +166,98 @@ Adding a meal on `/add` runs this client → API chain (see `components/MealForm
 
 1. **Upload (optional)** — `POST /api/upload` with multipart field `photo` (max 10MB). Stores the
    file in the private `meal-photos` bucket and returns `{ path, url }` where `url` is a
-   short-lived signed URL (~1 hour). Oversized files return HTTP 413.
+   short-lived signed URL (~1 hour). Status mapping: missing/non-file or empty body → **400**,
+   oversized → **413**, Storage/sign failure → **502**.
 2. **Estimate** — `POST /api/estimate` with `{ photoUrl?, description? }` (at least one required).
    Routes through `estimateNutrition()` → the active provider. Success body:
    `{ calories, protein, carbs, fat }`. Error mapping (`lib/nutrition/errors.ts`):
    `NutritionInputError` / `NutritionParseError` → 422, `NutritionUnavailableError` → 503,
-   `NutritionTimeoutError` → 504, unknown → 500.
+   `NutritionTimeoutError` → 504, unknown → 500. See [Photo URL allowlist](#photo-url-allowlist-estimate)
+   and [Estimate response parsing](#estimate-response-parsing).
 3. **Save** — `POST /api/meals` with the estimate plus optional `photoPath`, `description`, and
    `mealType` (`breakfast` \| `lunch` \| `dinner` \| `snack` \| `drink`). Requires at least a
    photo path or non-empty description, a valid `mealType` when present, and finite numbers for
-   all four macros. Persists via `lib/meals/repository.ts` (201 on success).
+   all four macros (`Infinity` / non-numbers → 422). Persists via `lib/meals/repository.ts`
+   (201 on success).
 
 **Re-estimate / retry:** After a successful upload, `MealForm` keeps both the Storage `path` and
-the signed `url` in component state. A second estimate (error retry or the "Re-estimate" button)
-reuses that signed URL and does **not** re-upload. Clearing or replacing the photo resets both.
-If the signed URL has expired (~1 hour), upload again before estimating. Manual entry
-("skip estimate") jumps to the review stage with zeros so macros can be typed in by hand.
+the signed `url` in component state. Photo reuse is decided by
+[`resolveEstimatePhoto`](lib/meals/estimatePhoto.ts) (`needsUpload` only when there is a local
+file and no cached path). A second estimate (error retry or the "Re-estimate" button) reuses the
+cached signed URL and does **not** re-upload. Clearing or replacing the photo resets both. If the
+signed URL has expired (~1 hour), upload again before estimating. Manual entry ("skip estimate")
+jumps to the review stage with zeros so macros can be typed in by hand.
 
-Other meal APIs: `GET /api/meals` (list, newest first), `PATCH /api/meals/[id]` (rename
-description; empty name → 400), `DELETE /api/meals/[id]` (row + photo cleanup; unknown id → 404).
+Other meal APIs: `GET /api/meals` (list, newest first; list failure → 500),
+`PATCH /api/meals/[id]` (rename description; empty name → 400; unknown id → 404),
+`DELETE /api/meals/[id]` (deletes the row, then best-effort removes the Storage object; unknown
+id → 404; Storage cleanup errors are logged and do **not** fail the request once the row is gone).
 
-The Log view (`/`) groups meals by local calendar day via `lib/meals/grouping.ts`
-(`groupMealsByDay`) and shows progress against a fixed `DAILY_CALORIE_GOAL` of 1800 kcal
-(not yet a user setting).
+The Log view (`/`, see [Screenshots](#screenshots)) groups meals by local calendar day via
+`lib/meals/grouping.ts` (`groupMealsByDay`). Each day renders a `DayOverviewCard` calorie ring
+and macro totals against a fixed `DAILY_CALORIE_GOAL` of 1800 kcal (not yet a user setting),
+then a `MealCard` list for that day.
+
+### Photo URL allowlist (estimate)
+
+`photoUrl` on `POST /api/estimate` is client-supplied. Both providers download it through
+[`lib/nutrition/fetchPhoto.ts`](lib/nutrition/fetchPhoto.ts) (`fetchPhotoAsBase64` /
+`fetchPhotoAsDataUrl`) before calling the model — they do **not** fetch arbitrary URLs.
+
+Constraints (enforced before any network read of the image):
+
+- Origin must match `NEXT_PUBLIC_SUPABASE_URL` exactly (same host + scheme + port).
+- Path must start with `/storage/v1/object/sign/` (signed object URLs only — public or other
+  Storage paths are rejected).
+- Download is capped at **10MB** (`MAX_ESTIMATE_PHOTO_BYTES`), matching the upload route, so
+  estimate cannot pull larger blobs than upload accepts.
+- Failures throw `NutritionInputError` → HTTP **422** (e.g. wrong host, non-signed path,
+  missing `NEXT_PUBLIC_SUPABASE_URL`, photo too large, or HTTP error loading the signed URL).
+
+Example of an accepted URL shape (token and object key vary):
+
+```text
+http://127.0.0.1:54321/storage/v1/object/sign/meal-photos/<object>?token=<jwt>
+```
+
+Callers should pass the `url` from `/api/upload` (or a freshly signed URL from meal list), not a
+raw Storage path, not a public object URL, and not an external image link.
+
+### Estimate response parsing
+
+Both providers extract a JSON object from the model reply, then validate it with
+[`lib/nutrition/parseEstimate.ts`](lib/nutrition/parseEstimate.ts) (`parseEstimate` /
+`estimateSchema`). Invalid output becomes `NutritionParseError` → HTTP **422**.
+
+Accepted macro fields (`calories`, `protein`, `carbs`, `fat`):
+
+- Finite non-negative numbers (`450`, `30.5`)
+- Numeric strings the model sometimes returns (`"450"`, `"30.5"`)
+
+Rejected (fail closed — do **not** coerce):
+
+- `null` / missing fields (including partial abstention, e.g. calories set but `protein: null`)
+- Empty strings (`""`)
+- Booleans (`true` / `false` — Zod's `z.coerce.number()` would turn these into `1` / `0`)
+- Negatives and non-numeric strings (`"450kcal"`)
+
+Intent: when the model abstains on a field, the API must not invent zeros that look like a
+plausible estimate. The UI can retry or use manual entry (`skipToManualEntry` in `MealForm`).
 
 ## Project structure
 
 - `app/` - routes: `/` (Log view), `/add` (meal entry form), `/api/estimate`, `/api/upload`,
   `/api/meals`, `/api/meals/[id]`
-- `lib/nutrition/` - the `estimateNutrition()` seam and its providers (Ollama, Hugging Face) -
-  swap between them via the `NUTRITION_PROVIDER` env var
-- `lib/meals/` - Supabase data access (repository) and day-grouping/formatting helpers
+- `lib/nutrition/` - the `estimateNutrition()` seam, providers (Ollama, Hugging Face),
+  `fetchPhoto.ts` (signed-URL allowlist + size cap), and `parseEstimate.ts` (macro JSON
+  validation shared by every provider) - swap backends via the `NUTRITION_PROVIDER` env var
+- `lib/meals/` - Supabase data access (`repository.ts`), estimate photo resolution
+  (`estimatePhoto.ts` / `resolveEstimatePhoto`), and day-grouping/formatting helpers
   (`DAILY_CALORIE_GOAL`, `groupMealsByDay`, date/time formatters)
 - `lib/supabase/server.ts` - server-only Supabase client (secret key)
 - `supabase/migrations/` - the `meals` table and `meal-photos` Storage bucket, both with RLS
   enabled and no anon/authenticated policies (access only via the secret key, server-side)
+- `docs/screenshots/` - UI screenshots embedded in this README (log view + add-meal form)
 - `*.test.ts` + `vitest.config.ts` - unit/API regression tests (see [Testing](#testing))
 
 ## Notes on data access
@@ -217,7 +280,12 @@ minted on read (`listMeals` / upload response) and expire after about an hour.
 | HF estimate: missing API key | `HUGGINGFACE_API_KEY` unset while `NUTRITION_PROVIDER=huggingface` | Create a fine-grained token with "Make calls to Inference Providers" and set it in env |
 | Supabase client errors on boot / upload | Missing or wrong `NEXT_PUBLIC_SUPABASE_URL` / `SUPABASE_SECRET_KEY` | Run `npx supabase status` and copy `API_URL` + `SECRET_KEY` (`sb_secret_...`) into `.env.local` |
 | Photo preview works but estimate can't load the image | Signed URL expired or Storage unreachable from the server | Clear the photo and upload again (retry alone can't mint a fresh signed URL); ensure the Next.js server can reach local Supabase (`127.0.0.1:54321`) |
-| Re-estimate after an error ignores the photo | Client bug (pre-fix) or expired URL | Current `MealForm` caches `uploadedUrl` with `uploadedPath`; if still wrong, hard-refresh and re-upload |
+| Estimate 422: "Photo URL must be a signed URL from this app's storage" | `photoUrl` is not a signed object URL on this project's Supabase origin (SSRF allowlist) | Pass the `url` from `POST /api/upload` / meal list — must be `{NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/sign/...`. External, public-bucket, or path-only values are rejected |
+| Estimate 422: "Photo is too large to estimate (max 10MB)" | Signed object larger than the download cap | Re-upload a smaller image (upload also enforces 10MB) |
+| Estimate 422 about missing `NEXT_PUBLIC_SUPABASE_URL` | Env unset while estimating with a photo | Set `NEXT_PUBLIC_SUPABASE_URL` to the same API URL used for upload (allowlist can't verify otherwise) |
+| Estimate 422: "couldn't be understood as a nutrition estimate" | Model returned non-JSON, incomplete macros, or null/empty/boolean fields | Retry estimate; if the model keeps abstaining, use manual entry and edit macros on the review step |
+| Upload 400: empty photo / no `photo` field | Multipart missing `photo` or zero-byte file | Send a real image under the `photo` field |
+| Re-estimate after an error ignores the photo | Expired signed URL, or photo cleared from form state | Hard-refresh and re-upload; confirm `MealForm` still has `uploadedUrl` (via `resolveEstimatePhoto`) |
 
 ## Useful commands
 
