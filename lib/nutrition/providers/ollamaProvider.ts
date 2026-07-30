@@ -1,4 +1,3 @@
-import { z } from "zod";
 import {
   NutritionInputError,
   NutritionParseError,
@@ -6,18 +5,12 @@ import {
   NutritionUnavailableError,
 } from "../errors";
 import { fetchPhotoAsBase64 } from "../fetchPhoto";
+import { parseEstimate } from "../parseEstimate";
 import type { NutritionEstimate, NutritionInput, NutritionProvider } from "../types";
 
 const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL ?? "http://localhost:11434";
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "llava";
 const TIMEOUT_MS = Number(process.env.ESTIMATE_TIMEOUT_MS ?? 30_000);
-
-const estimateSchema = z.object({
-  calories: z.coerce.number().min(0),
-  protein: z.coerce.number().min(0),
-  carbs: z.coerce.number().min(0),
-  fat: z.coerce.number().min(0),
-});
 
 const PROMPT = `You are a nutrition estimation assistant. Look at the food (photo and/or description provided) and estimate its nutritional content as best you can.
 
@@ -94,11 +87,11 @@ export const ollamaProvider: NutritionProvider = {
     }
 
     const parsedJson = extractJsonObject(payload.response);
-    const result = estimateSchema.safeParse(parsedJson);
-    if (!result.success) {
+    const estimate = parseEstimate(parsedJson);
+    if (!estimate) {
       throw new NutritionParseError();
     }
 
-    return result.data;
+    return estimate;
   },
 };
