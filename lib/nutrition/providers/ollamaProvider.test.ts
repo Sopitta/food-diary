@@ -114,6 +114,29 @@ describe("ollamaProvider", () => {
     );
   });
 
+  it("throws NutritionParseError when the model returns null macros (not coerce to 0)", async () => {
+    // Default provider must fail closed on the same abstention shape as Hugging Face.
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        response: JSON.stringify({ calories: 500, protein: null, carbs: 40, fat: null }),
+      }),
+    );
+    await expect(ollamaProvider.estimate({ description: "uncertain macros" })).rejects.toBeInstanceOf(
+      NutritionParseError,
+    );
+  });
+
+  it("throws NutritionParseError when macros are empty strings or booleans", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        response: JSON.stringify({ calories: "", protein: false, carbs: true, fat: 10 }),
+      }),
+    );
+    await expect(ollamaProvider.estimate({ description: "coercion traps" })).rejects.toBeInstanceOf(
+      NutritionParseError,
+    );
+  });
+
   it("maps AbortError to NutritionTimeoutError", async () => {
     const abortError = new Error("aborted");
     abortError.name = "AbortError";
