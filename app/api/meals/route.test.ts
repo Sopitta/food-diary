@@ -47,6 +47,19 @@ describe("POST /api/meals", () => {
     insertMeal.mockReset();
   });
 
+  it("returns 400 for invalid JSON", async () => {
+    const response = await POST(
+      new NextRequest("http://localhost/api/meals", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{not-json",
+      }),
+    );
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({ error: "Invalid JSON body." });
+    expect(insertMeal).not.toHaveBeenCalled();
+  });
+
   it("requires a photo or non-empty description", async () => {
     const response = await POST(postJson({ ...validMacros, description: "  " }));
     expect(response.status).toBe(422);
@@ -91,5 +104,22 @@ describe("POST /api/meals", () => {
       mealType: "lunch",
       ...validMacros,
     });
+  });
+
+  it("maps repository failures to 500 with the error message", async () => {
+    insertMeal.mockRejectedValueOnce(new Error("Failed to save meal: duplicate"));
+    const response = await POST(postJson({ ...validMacros, description: "salad" }));
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toEqual({
+      error: "Failed to save meal: duplicate",
+    });
+  });
+
+  it("rejects non-finite nutrition numbers such as Infinity", async () => {
+    const response = await POST(
+      postJson({ description: "salad", calories: Infinity, protein: 1, carbs: 1, fat: 1 }),
+    );
+    expect(response.status).toBe(422);
+    expect(insertMeal).not.toHaveBeenCalled();
   });
 });
