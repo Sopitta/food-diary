@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
+import { resolveEstimatePhoto } from "@/lib/meals/estimatePhoto";
 import { MEAL_TYPES, type MealType } from "@/lib/meals/types";
 import { ArrowLeftIcon, CameraIcon, ImageIcon, MEAL_TYPE_META, SparklesIcon } from "./icons";
 
@@ -96,10 +97,15 @@ export default function MealForm() {
 
     setStage("estimating");
     try {
-      let photoPath = uploadedPath;
-      let photoUrl: string | undefined = uploadedUrl ?? undefined;
+      const resolved = resolveEstimatePhoto({
+        hasPhotoFile: Boolean(photoFile),
+        uploadedPath,
+        uploadedUrl,
+      });
+      let photoPath = resolved.photoPath;
+      let photoUrl = resolved.photoUrl;
 
-      if (photoFile && !photoPath) {
+      if (resolved.needsUpload && photoFile) {
         const formData = new FormData();
         formData.append("photo", photoFile);
         const uploadRes = await fetch("/api/upload", { method: "POST", body: formData });
