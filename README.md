@@ -3,8 +3,6 @@
 A local-first food diary. Log a meal by photo and/or short description and get an instant
 calorie/protein/carb/fat estimate from a vision-language model.
 
-**Live app:** [food-diary-eosin.vercel.app](https://food-diary-eosin.vercel.app)
-
 No auth, single user: this is a personal project, not a multi-tenant product. Develop against a
 local Ollama model, then switch to Hugging Face Inference Providers for deployment (see
 [Switching nutrition providers](#switching-nutrition-providers-eg-for-deployment) below).
