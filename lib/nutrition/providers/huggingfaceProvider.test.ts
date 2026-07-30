@@ -119,6 +119,17 @@ describe("huggingfaceProvider", () => {
     ).rejects.toBeInstanceOf(NutritionParseError);
   });
 
+  it("throws NutritionParseError when the model returns null macros (not coerce to 0)", async () => {
+    fetchMock.mockResolvedValueOnce(
+      hfCompletion(
+        JSON.stringify({ calories: 500, protein: null, carbs: 40, fat: null }),
+      ),
+    );
+    await expect(
+      huggingfaceProvider.estimate({ description: "uncertain macros" }),
+    ).rejects.toBeInstanceOf(NutritionParseError);
+  });
+
   it("maps HTTP errors to NutritionUnavailableError", async () => {
     fetchMock.mockResolvedValueOnce(
       new Response("model not supported", { status: 400 }),

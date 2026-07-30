@@ -1,4 +1,3 @@
-import { z } from "zod";
 import {
   NutritionInputError,
   NutritionParseError,
@@ -6,6 +5,7 @@ import {
   NutritionUnavailableError,
 } from "../errors";
 import { fetchPhotoAsDataUrl } from "../fetchPhoto";
+import { parseEstimate } from "../parseEstimate";
 import type { NutritionEstimate, NutritionInput, NutritionProvider } from "../types";
 
 // Hugging Face Inference Providers: a hosted, OpenAI-compatible chat completions
@@ -30,13 +30,6 @@ function resolveHfModel(): string {
 function resolveTimeoutMs(): number {
   return Number(process.env.ESTIMATE_TIMEOUT_MS ?? 30_000);
 }
-
-const estimateSchema = z.object({
-  calories: z.coerce.number().min(0),
-  protein: z.coerce.number().min(0),
-  carbs: z.coerce.number().min(0),
-  fat: z.coerce.number().min(0),
-});
 
 const PROMPT = `You are a nutrition estimation assistant. Look at the food (photo and/or description provided) and estimate its nutritional content as best you can.
 
@@ -127,11 +120,11 @@ export const huggingfaceProvider: NutritionProvider = {
     }
 
     const parsedJson = extractJsonObject(text);
-    const result = estimateSchema.safeParse(parsedJson);
-    if (!result.success) {
+    const estimate = parseEstimate(parsedJson);
+    if (!estimate) {
       throw new NutritionParseError();
     }
 
-    return result.data;
+    return estimate;
   },
 };
