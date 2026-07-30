@@ -7,6 +7,12 @@ No auth, single user: this is a personal project, not a multi-tenant product. De
 local Ollama model, then switch to Hugging Face Inference Providers for deployment (see
 [Switching nutrition providers](#switching-nutrition-providers-eg-for-deployment) below).
 
+## Screenshots
+
+| Log | Add a meal |
+| --- | --- |
+| ![Log view showing today's calorie ring, macro totals, and logged meals](docs/screenshots/log-view.png) | ![Add a meal form with meal type, photo, and estimated nutrition](docs/screenshots/add-meal.png) |
+
 ## Stack
 
 - **Frontend:** Next.js (App Router) + TypeScript + Tailwind CSS
