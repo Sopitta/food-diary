@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  dateKeyFor,
   formatDateLabel,
   formatShortDate,
   formatTime,
@@ -68,6 +69,27 @@ describe("groupMealsByDay", () => {
   it("returns an empty list for no meals", () => {
     expect(groupMealsByDay([])).toEqual([]);
   });
+
+  it("buckets an evening US meal on the user's calendar day, not UTC", () => {
+    // 8:00 PM PDT on July 29, 2026 == 2026-07-30T03:00:00.000Z
+    const dinnerInLosAngeles = "2026-07-30T03:00:00.000Z";
+
+    expect(dateKeyFor(dinnerInLosAngeles, "UTC")).toBe("2026-07-30");
+    expect(dateKeyFor(dinnerInLosAngeles, "America/Los_Angeles")).toBe("2026-07-29");
+
+    const groupsUtc = groupMealsByDay(
+      [meal({ id: "1", createdAt: dinnerInLosAngeles, calories: 700 })],
+      "UTC",
+    );
+    const groupsLa = groupMealsByDay(
+      [meal({ id: "1", createdAt: dinnerInLosAngeles, calories: 700 })],
+      "America/Los_Angeles",
+    );
+
+    expect(groupsUtc[0].dateKey).toBe("2026-07-30");
+    expect(groupsLa[0].dateKey).toBe("2026-07-29");
+    expect(groupsLa[0].totals.calories).toBe(700);
+  });
 });
 
 describe("formatDateLabel", () => {
@@ -95,5 +117,10 @@ describe("formatTime", () => {
     expect(formatTime(new Date(2026, 6, 29, 0, 5).toISOString())).toBe("12:05 AM");
     expect(formatTime(new Date(2026, 6, 29, 12, 0).toISOString())).toBe("12:00 PM");
     expect(formatTime(new Date(2026, 6, 29, 15, 9).toISOString())).toBe("3:09 PM");
+  });
+
+  it("formats times in an explicit IANA zone", () => {
+    expect(formatTime("2026-07-30T03:00:00.000Z", "America/Los_Angeles")).toBe("8:00 PM");
+    expect(formatTime("2026-07-30T03:00:00.000Z", "UTC")).toBe("3:00 AM");
   });
 });
