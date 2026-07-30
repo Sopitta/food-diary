@@ -101,13 +101,14 @@ register it in `getProvider()`.
 | Where it runs | Local process (`OLLAMA_BASE_URL`, default `http://localhost:11434`) | Hosted OpenAI-compatible API at `https://router.huggingface.co/v1` |
 | Model env | `OLLAMA_MODEL` (default `llava`) — must be vision-capable and already pulled | `HUGGINGFACE_MODEL` (default `Qwen/Qwen2.5-VL-72B-Instruct`) — must be routable on your account |
 | Auth | None | `HUGGINGFACE_API_KEY` required |
-| Photos | Fetched server-side and sent as base64 | Fetched server-side and inlined as a data URL (HF can't reach private/local signed URLs) |
+| Photos | Fetched server-side via `lib/nutrition/fetchPhoto.ts` (allowlisted signed Supabase URLs only), sent as base64 | Same allowlisted fetch, then inlined as a data URL (HF can't reach private/local signed URLs itself) |
 | Timeout | `ESTIMATE_TIMEOUT_MS` (code default 30s; `.env.local.example` uses 60s for cold local models) | Same env var |
 
 ## Deployment (Vercel)
 
-The live app runs on Vercel, connected to this GitHub repo - every push to `main` auto-deploys.
-To set up your own deployment:
+There is currently **no advertised live URL** — production sharing is paused. The repo can still
+be deployed to Vercel (git-connected projects auto-deploy on push to `main`). To stand up your
+own deployment:
 
 1. Create a hosted Supabase project (`npx supabase projects create`, or via the dashboard) and
    push the migrations: `npx supabase link --project-ref <ref>` then `npx supabase db push`.
@@ -133,9 +134,12 @@ npm test        # run the Vitest suite once
 npm run test:watch
 ```
 
-Covers the `estimateNutrition()` provider routing, the Hugging Face provider (model
-default/override, error mapping, photo-to-data-URL inlining), meal day-grouping/totals, and the
-`/api/estimate` and `/api/meals` route handlers.
+Covers `estimateNutrition()` provider routing, the Hugging Face provider (model
+default/override, error mapping, photo-to-data-URL inlining), photo URL allowlisting /
+size caps in `lib/nutrition/fetchPhoto.ts`, macro JSON parsing in
+`lib/nutrition/parseEstimate.ts`, meal day-grouping/totals, and the `/api/estimate` and
+`/api/meals` route handlers. Tests mock providers and Supabase; they do not require Ollama
+or a running database. No browser/E2E suite yet.
 
 ## Meal logging workflow
 
@@ -143,28 +147,89 @@ Adding a meal on `/add` runs this client → API chain (see `components/MealForm
 
 1. **Upload (optional)** — `POST /api/upload` with multipart field `photo` (max 10MB). Stores the
    file in the private `meal-photos` bucket and returns `{ path, url }` where `url` is a
-   short-lived signed URL (~1 hour).
+   short-lived signed URL (~1 hour). The form caches both `path` and `url` so re-estimate /
+   retry can reuse the photo without re-uploading.
 2. **Estimate** — `POST /api/estimate` with `{ photoUrl?, description? }` (at least one required).
    Routes through `estimateNutrition()` → the active provider. Success body:
-   `{ calories, protein, carbs, fat }`. Errors map to HTTP 422 / 503 / 504 via
-   `lib/nutrition/errors.ts`.
+   `{ calories, protein, carbs, fat }`. Error mapping (`lib/nutrition/errors.ts`):
+   `NutritionInputError` / `NutritionParseError` → 422, `NutritionUnavailableError` → 503,
+   `NutritionTimeoutError` → 504, unknown → 500.
 3. **Save** — `POST /api/meals` with the estimate plus optional `photoPath`, `description`, and
    `mealType` (`breakfast` \| `lunch` \| `dinner` \| `snack` \| `drink`). Persists via
    `lib/meals/repository.ts`.
 
+**Re-estimate / retry:** After a successful upload, `MealForm` keeps both the Storage `path` and
+the signed `url` in component state. A second estimate (error retry or "Re-estimate") reuses that
+signed URL and does **not** re-upload. Clearing or replacing the photo resets both. If the signed
+URL has expired (~1 hour), upload again before estimating. Manual skip jumps to review with zero
+macros (user edits before save).
+
 Other meal APIs: `GET /api/meals` (list, newest first), `PATCH /api/meals/[id]` (rename
 description), `DELETE /api/meals/[id]` (row + photo cleanup).
+
+The Log view (`/`) groups meals by local calendar day via `lib/meals/grouping.ts`
+(`groupMealsByDay`) and shows progress against a fixed `DAILY_CALORIE_GOAL` of 1800 kcal
+(not yet a user setting).
+
+### Photo URL allowlist (estimate)
+
+`photoUrl` on `POST /api/estimate` is client-supplied. Both providers download it through
+[`lib/nutrition/fetchPhoto.ts`](lib/nutrition/fetchPhoto.ts) before calling the model — they do
+**not** fetch arbitrary URLs.
+
+Constraints (enforced before any network read of the image):
+
+- Origin must match `NEXT_PUBLIC_SUPABASE_URL` exactly (same host + scheme + port).
+- Path must start with `/storage/v1/object/sign/` (signed object URLs only — public or other
+  Storage paths are rejected).
+- Download is capped at **10MB** (`MAX_ESTIMATE_PHOTO_BYTES`), matching the upload route, so
+  estimate cannot pull larger blobs than upload accepts.
+- Failures throw `NutritionInputError` → HTTP **422** (e.g. wrong host, non-signed path,
+  missing `NEXT_PUBLIC_SUPABASE_URL`, photo too large, or HTTP error loading the signed URL).
+
+Example of an accepted URL shape (token and object key vary):
+
+```text
+http://127.0.0.1:54321/storage/v1/object/sign/meal-photos/<object>?token=<jwt>
+```
+
+Callers should pass the `url` from `/api/upload` (or a freshly signed URL from meal list), not a
+raw Storage path, not a public object URL, and not an external image link.
+
+### Estimate response parsing
+
+Both providers extract a JSON object from the model reply, then validate it with
+[`lib/nutrition/parseEstimate.ts`](lib/nutrition/parseEstimate.ts) (`parseEstimate` /
+`estimateSchema`). Invalid output becomes `NutritionParseError` → HTTP **422**.
+
+Accepted macro fields (`calories`, `protein`, `carbs`, `fat`):
+
+- Finite non-negative numbers (`450`, `30.5`)
+- Numeric strings the model sometimes returns (`"450"`, `"30.5"`)
+
+Rejected (fail closed — do **not** coerce):
+
+- `null` / missing fields (including partial abstention, e.g. calories set but `protein: null`)
+- Empty strings (`""`)
+- Booleans (`true` / `false` — Zod's `z.coerce.number()` would turn these into `1` / `0`)
+- Negatives and non-numeric strings (`"450kcal"`)
+
+Intent: when the model abstains on a field, the API must not invent zeros that look like a
+plausible estimate. The UI can retry or use manual entry (`skipToManualEntry` in `MealForm`).
 
 ## Project structure
 
 - `app/` - routes: `/` (Log view), `/add` (meal entry form), `/api/estimate`, `/api/upload`,
   `/api/meals`, `/api/meals/[id]`
-- `lib/nutrition/` - the `estimateNutrition()` seam and its providers (Ollama, Hugging Face) -
-  swap between them via the `NUTRITION_PROVIDER` env var
+- `lib/nutrition/` - the `estimateNutrition()` seam, providers (Ollama, Hugging Face),
+  `fetchPhoto.ts` (signed-URL allowlist + size cap), and `parseEstimate.ts` (macro JSON
+  validation shared by every provider) - swap backends via the `NUTRITION_PROVIDER` env var
 - `lib/meals/` - Supabase data access (repository) and day-grouping/formatting helpers
+  (`DAILY_CALORIE_GOAL`, `groupMealsByDay`, date/time formatters)
 - `lib/supabase/server.ts` - server-only Supabase client (secret key)
 - `supabase/migrations/` - the `meals` table and `meal-photos` Storage bucket, both with RLS
   enabled and no anon/authenticated policies (access only via the secret key, server-side)
+- `*.test.ts` + `vitest.config.ts` - unit/API regression tests (see [Testing](#testing))
 
 ## Notes on data access
 
@@ -185,13 +250,19 @@ minted on read (`listMeals` / upload response) and expire after about an hour.
 | HF estimate fails with HTTP 4xx mentioning the model | Model not routable via Inference Providers | Use the default `Qwen/Qwen2.5-VL-72B-Instruct`, or pick a VLM listed under [Inference Providers](https://huggingface.co/settings/inference-providers) for your account — smaller checkpoints often aren't available |
 | HF estimate: missing API key | `HUGGINGFACE_API_KEY` unset while `NUTRITION_PROVIDER=huggingface` | Create a fine-grained token with "Make calls to Inference Providers" and set it in env |
 | Supabase client errors on boot / upload | Missing or wrong `NEXT_PUBLIC_SUPABASE_URL` / `SUPABASE_SECRET_KEY` | Run `npx supabase status` and copy `API_URL` + `SECRET_KEY` (`sb_secret_...`) into `.env.local` |
-| Photo preview works but estimate can't load the image | Signed URL expired or Storage unreachable from the server | Re-upload / re-estimate; ensure the Next.js server can reach local Supabase (`127.0.0.1:54321`) |
+| Photo preview works but estimate can't load the image | Signed URL expired or Storage unreachable from the server | Clear the photo and upload again (retry alone can't mint a fresh signed URL); ensure the Next.js server can reach local Supabase (`127.0.0.1:54321`) |
+| Estimate 422: "Photo URL must be a signed URL from this app's storage" | `photoUrl` is not a signed object URL on this project's Supabase origin (SSRF allowlist) | Pass the `url` from `POST /api/upload` / meal list — must be `{NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/sign/...`. External, public-bucket, or path-only values are rejected |
+| Estimate 422: "Photo is too large to estimate (max 10MB)" | Signed object larger than the download cap | Re-upload a smaller image (upload also enforces 10MB) |
+| Estimate 422 about missing `NEXT_PUBLIC_SUPABASE_URL` | Env unset while estimating with a photo | Set `NEXT_PUBLIC_SUPABASE_URL` to the same API URL used for upload (allowlist can't verify otherwise) |
+| Estimate 422: "couldn't be understood as a nutrition estimate" | Model returned non-JSON, incomplete macros, or null/empty/boolean fields | Retry estimate; if the model keeps abstaining, use manual entry and edit macros on the review step |
+| Re-estimate after an error ignores the photo | Expired signed URL, or photo cleared from form state | Hard-refresh and re-upload; confirm `MealForm` still has `uploadedUrl` cached |
 
 ## Useful commands
 
 ```bash
-npx supabase status   # print local API URL / keys again
-npx supabase stop     # stop the local stack
-npx supabase db reset # recreate the local DB and reapply migrations
+npm test               # run unit/API regression tests
+npx supabase status    # print local API URL / keys again
+npx supabase stop      # stop the local stack
+npx supabase db reset  # recreate the local DB and reapply migrations
 ollama list            # see which local models are available
 ```
