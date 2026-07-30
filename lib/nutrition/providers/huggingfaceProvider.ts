@@ -5,6 +5,7 @@ import {
   NutritionTimeoutError,
   NutritionUnavailableError,
 } from "../errors";
+import { fetchPhotoAsDataUrl } from "../fetchPhoto";
 import type { NutritionEstimate, NutritionInput, NutritionProvider } from "../types";
 
 // Hugging Face Inference Providers: a hosted, OpenAI-compatible chat completions
@@ -44,19 +45,6 @@ Respond with ONLY a JSON object in exactly this shape, no other text:
 
 If a description is given without a clear serving size, assume a typical single serving. Give your best numeric estimate even if uncertain - never respond with null or a range.`;
 
-/** Downloads the photo and inlines it as a data URL, since the model runs on
- * Hugging Face's infrastructure and can't reach a local/private photo URL. */
-async function fetchImageAsDataUrl(photoUrl: string): Promise<string> {
-  const res = await fetch(photoUrl);
-  if (!res.ok) {
-    throw new NutritionInputError(`Could not load the photo for estimation (HTTP ${res.status}).`);
-  }
-  const contentType = res.headers.get("content-type") ?? "image/jpeg";
-  const buffer = await res.arrayBuffer();
-  const base64 = Buffer.from(buffer).toString("base64");
-  return `data:${contentType};base64,${base64}`;
-}
-
 function buildPrompt(description?: string): string {
   if (!description) return PROMPT;
   return `${PROMPT}\n\nDescription provided by the user: "${description}"`;
@@ -92,7 +80,8 @@ export const huggingfaceProvider: NutritionProvider = {
 
     const content: Array<Record<string, unknown>> = [{ type: "text", text: buildPrompt(description) }];
     if (photoUrl) {
-      const dataUrl = await fetchImageAsDataUrl(photoUrl);
+      // Allowlisted + size-capped: photoUrl is client-supplied and must not become an SSRF proxy.
+      const dataUrl = await fetchPhotoAsDataUrl(photoUrl);
       content.push({ type: "image_url", image_url: { url: dataUrl } });
     }
 

@@ -5,6 +5,7 @@ import {
   NutritionTimeoutError,
   NutritionUnavailableError,
 } from "../errors";
+import { fetchPhotoAsBase64 } from "../fetchPhoto";
 import type { NutritionEstimate, NutritionInput, NutritionProvider } from "../types";
 
 const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL ?? "http://localhost:11434";
@@ -24,15 +25,6 @@ Respond with ONLY a JSON object in exactly this shape, no other text:
 {"calories": <number>, "protein": <number, grams>, "carbs": <number, grams>, "fat": <number, grams>}
 
 If a description is given without a clear serving size, assume a typical single serving. Give your best numeric estimate even if uncertain - never respond with null or a range.`;
-
-async function fetchImageAsBase64(photoUrl: string): Promise<string> {
-  const res = await fetch(photoUrl);
-  if (!res.ok) {
-    throw new NutritionInputError(`Could not load the photo for estimation (HTTP ${res.status}).`);
-  }
-  const buffer = await res.arrayBuffer();
-  return Buffer.from(buffer).toString("base64");
-}
 
 function buildPrompt(description?: string): string {
   if (!description) return PROMPT;
@@ -60,7 +52,8 @@ export const ollamaProvider: NutritionProvider = {
       throw new NutritionInputError();
     }
 
-    const images = photoUrl ? [await fetchImageAsBase64(photoUrl)] : undefined;
+    // Allowlisted + size-capped: photoUrl is client-supplied and must not become an SSRF proxy.
+    const images = photoUrl ? [(await fetchPhotoAsBase64(photoUrl)).base64] : undefined;
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
