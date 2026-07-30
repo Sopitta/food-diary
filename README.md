@@ -1,10 +1,13 @@
 # Food Diary
 
 A local-first food diary. Log a meal by photo and/or short description and get an instant
-calorie/protein/carb/fat estimate from a local vision-language model, running via [Ollama](https://ollama.com/).
+calorie/protein/carb/fat estimate from a vision-language model.
 
-No auth, single user, local-first: the goal of this pass is to get everything working on your
-machine before pushing to GitHub or deploying to Vercel.
+**Live app:** [food-diary-eosin.vercel.app](https://food-diary-eosin.vercel.app)
+
+No auth, single user: this is a personal project, not a multi-tenant product. Develop against a
+local Ollama model, then switch to Hugging Face Inference Providers for deployment (see
+[Switching nutrition providers](#switching-nutrition-providers-eg-for-deployment) below).
 
 ## Stack
 
@@ -102,6 +105,39 @@ register it in `getProvider()`.
 | Auth | None | `HUGGINGFACE_API_KEY` required |
 | Photos | Fetched server-side and sent as base64 | Fetched server-side and inlined as a data URL (HF can't reach private/local signed URLs) |
 | Timeout | `ESTIMATE_TIMEOUT_MS` (code default 30s; `.env.local.example` uses 60s for cold local models) | Same env var |
+
+## Deployment (Vercel)
+
+The live app runs on Vercel, connected to this GitHub repo - every push to `main` auto-deploys.
+To set up your own deployment:
+
+1. Create a hosted Supabase project (`npx supabase projects create`, or via the dashboard) and
+   push the migrations: `npx supabase link --project-ref <ref>` then `npx supabase db push`.
+2. Import this repo in [Vercel](https://vercel.com/new) (or `vercel link` + `vercel git connect`).
+3. Set these environment variables in the Vercel project (Production and Preview) - see
+   [Setup](#setup) and [Switching nutrition providers](#switching-nutrition-providers-eg-for-deployment)
+   above for where each value comes from:
+   - `NEXT_PUBLIC_SUPABASE_URL`, `SUPABASE_SECRET_KEY` - from the hosted Supabase project
+   - `NUTRITION_PROVIDER=huggingface`, `HUGGINGFACE_API_KEY`, `HUGGINGFACE_MODEL` - Ollama can't
+     run on Vercel (no persistent server, multi-GB model weights)
+   - `ESTIMATE_TIMEOUT_MS` (e.g. `60000`) - optional, Vercel's Fluid Compute default (300s) is
+     comfortably above this either way
+4. Deploy (`vercel --prod`, or just push to `main`).
+
+Since this repo is public, double check before deploying: no `.env*` file except
+`.env.local.example` is tracked (see `.gitignore`), and all real secrets live only in Vercel's
+encrypted environment variables / your local `.env.local` - never in git history.
+
+## Testing
+
+```bash
+npm test        # run the Vitest suite once
+npm run test:watch
+```
+
+Covers the `estimateNutrition()` provider routing, the Hugging Face provider (model
+default/override, error mapping, photo-to-data-URL inlining), meal day-grouping/totals, and the
+`/api/estimate` and `/api/meals` route handlers.
 
 ## Meal logging workflow
 
